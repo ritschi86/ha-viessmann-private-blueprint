@@ -1,0 +1,703 @@
+blueprint:
+  name: Viessmann ViCare – Heizungsautomatik
+  description: |
+    Steuert eine Viessmann-Gastherme (z. B. Vitodens mit Vitotronic 200) über die offizielle ViCare-Integration: Heizsaison nach Monat und 24-h-Mittel der Außentemperatur, Tag/Nacht über einen Zeitplan-Helfer, gestaffelte Abwesenheit mit Urlaubsmodus, Warmwasser-Logik und eine langsam selbstlernende Heizkurve.
+
+    **Betriebsarten**
+
+    | Situation | Betriebsart |
+    |---|---|
+    | Heizsaison, Tag, jemand da | `dhwAndHeating` |
+    | Heizsaison, Nacht oder abwesend | `forcedReduced` (Warmwasser pausiert) |
+    | Heizsaison, Urlaub | `forcedReduced` mit Urlaubstemperatur |
+    | Keine Heizsaison | `dhw` |
+    | Keine Heizsaison, Urlaub | `standby` (Abschaltbetrieb, Frostschutz aktiv) |
+
+    **Voraussetzungen**
+
+    - Zeitprogramm „Heizung" der Therme durchgehend auf Normal (0–24 Uhr), damit `dhwAndHeating` tagsüber immer normal heizt.
+    - Statistik-Helfer über den Außentemperatur-Sensor der Therme (Merkmal `average_step`, maximales Alter 24 h).
+    - Zeitplan-Helfer: aktiv = Tag.
+    - `person`-Entitäten mit Ortung, damit die Zuhause-Zone die Personen zählt.
+
+    **Sparsam mit der Viessmann-API:** Geschrieben wird nur, wenn ein Sollwert vom Istwert abweicht. Jede Änderung steht mit Begründung im Logbuch.
+
+    **Lernen:** Am Ende jedes Heiztages (Zeitplan wechselt auf inaktiv) vergleicht die Automation die Raumtemperatur mit der Tagestemperatur. An milden Tagen passt sie das Niveau an, an kalten Tagen die Neigung, jeweils um einen kleinen Schritt und innerhalb fester Grenzen. Ohne Raumthermometer ist das Lernen aus.
+
+    **Manuell übersteuern:** Automation deaktivieren. Solange sie aktiv ist, stellt sie Änderungen an der Betriebsart wieder zurück.
+  domain: automation
+  homeassistant:
+    min_version: "2024.10.0"
+  input:
+    therme_section:
+      name: Therme
+      icon: mdi:water-boiler
+      description: Entitäten der ViCare-Integration und das 24-h-Mittel der Außentemperatur.
+      input:
+        climate_entity:
+          name: Heizkreis
+          description: Climate-Entität des Heizkreises, z. B. `climate.vscotho1_200_01_heizung`.
+          selector:
+            entity:
+              filter:
+                integration: vicare
+                domain: climate
+        normal_temp_entity:
+          name: Normaltemperatur
+          description: Number-Entität für die normale Raum-Solltemperatur.
+          selector:
+            entity:
+              filter:
+                integration: vicare
+                domain: number
+        reduced_temp_entity:
+          name: Reduzierte Temperatur
+          description: Number-Entität für die reduzierte Raum-Solltemperatur.
+          selector:
+            entity:
+              filter:
+                integration: vicare
+                domain: number
+        shift_entity:
+          name: Niveau (Verschiebung der Heizkurve)
+          selector:
+            entity:
+              filter:
+                integration: vicare
+                domain: number
+        slope_entity:
+          name: Neigung (Steigung der Heizkurve)
+          selector:
+            entity:
+              filter:
+                integration: vicare
+                domain: number
+        outside_mean_entity:
+          name: Außentemperatur, 24-h-Mittel
+          description: >-
+            Statistik-Helfer über den Außentemperatur-Sensor der Therme
+            (Merkmal `average_step`, maximales Alter 24 Stunden).
+          selector:
+            entity:
+              filter:
+                integration: statistics
+                domain: sensor
+        dhw_buttons:
+          name: Einmalige Warmwasserbereitung (optional)
+          description: >-
+            Button der Therme, der den Speicher nach dem Urlaub sofort aufheizt.
+            Leer lassen, wenn es keinen gibt.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                integration: vicare
+                domain: button
+
+    alltag_section:
+      name: Anwesenheit und Tagesablauf
+      icon: mdi:home-clock
+      input:
+        presence_zone:
+          name: Zuhause-Zone
+          description: Der Zustand der Zone ist die Zahl der Personen darin.
+          default: zone.home
+          selector:
+            entity:
+              filter:
+                domain: zone
+        day_schedule:
+          name: Zeitplan Tag
+          description: Zeitplan-Helfer. Aktiv = Tagbetrieb, inaktiv = Nacht.
+          selector:
+            entity:
+              filter:
+                domain: schedule
+        away_delay:
+          name: Abwesend nach
+          description: So lange muss das Haus leer sein, bevor abgesenkt wird.
+          default: 30
+          selector:
+            number:
+              min: 0
+              max: 240
+              step: 5
+              unit_of_measurement: min
+              mode: box
+        vacation_hours:
+          name: Urlaub nach
+          description: So lange muss das Haus leer sein, bevor der Urlaubsmodus greift.
+          default: 24
+          selector:
+            number:
+              min: 6
+              max: 168
+              step: 1
+              unit_of_measurement: h
+              mode: box
+
+    temperatur_section:
+      name: Raumtemperaturen
+      icon: mdi:thermometer
+      input:
+        day_temp:
+          name: Tagestemperatur
+          default: 21
+          selector:
+            number:
+              min: 15
+              max: 25
+              step: 1
+              unit_of_measurement: °C
+              mode: box
+        night_temp:
+          name: Nachttemperatur / abwesend
+          default: 17
+          selector:
+            number:
+              min: 10
+              max: 21
+              step: 1
+              unit_of_measurement: °C
+              mode: box
+        vacation_temp:
+          name: Urlaubstemperatur (Heizsaison)
+          default: 15
+          selector:
+            number:
+              min: 10
+              max: 21
+              step: 1
+              unit_of_measurement: °C
+              mode: box
+
+    saison_section:
+      name: Heizsaison
+      icon: mdi:calendar-range
+      input:
+        season_start:
+          name: Erster Heizmonat
+          default: 10
+          selector:
+            number:
+              min: 1
+              max: 12
+              step: 1
+              mode: box
+        season_end:
+          name: Letzter Heizmonat
+          default: 4
+          selector:
+            number:
+              min: 1
+              max: 12
+              step: 1
+              mode: box
+        heat_limit:
+          name: Heizgrenze in den Heizmonaten
+          description: Heizung ein, wenn das 24-h-Mittel darunter fällt.
+          default: 15
+          selector:
+            number:
+              min: 8
+              max: 20
+              step: 0.5
+              unit_of_measurement: °C
+              mode: box
+        offseason_limit:
+          name: Heizgrenze außerhalb der Heizmonate
+          description: Nur bei echtem Kälteeinbruch heizen.
+          default: 10
+          selector:
+            number:
+              min: 0
+              max: 15
+              step: 0.5
+              unit_of_measurement: °C
+              mode: box
+        hysteresis:
+          name: Hysterese
+          description: Heizung aus erst, wenn das Mittel um diesen Wert über der Grenze liegt.
+          default: 2
+          selector:
+            number:
+              min: 0.5
+              max: 5
+              step: 0.5
+              unit_of_measurement: K
+              mode: box
+
+    lernen_section:
+      name: Selbstlernende Heizkurve
+      icon: mdi:chart-bell-curve-cumulative
+      description: >-
+        Thermometer im Referenzraum mit ganz geöffnetem Heizkörperventil.
+        Mehrere Thermometer werden gemittelt. Leer = Lernen aus.
+      input:
+        room_sensors:
+          name: Raumthermometer
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                domain: sensor
+                device_class: temperature
+        cold_day_limit:
+          name: Grenze kalter Tag
+          description: Unter diesem 24-h-Mittel lernt die Neigung, darüber das Niveau.
+          default: 2
+          selector:
+            number:
+              min: -10
+              max: 10
+              step: 0.5
+              unit_of_measurement: °C
+              mode: box
+
+    lernen_fein_section:
+      name: Selbstlernende Heizkurve – Feineinstellung
+      icon: mdi:tune-variant
+      collapsed: true
+      input:
+        deadband:
+          name: Toleranz
+          description: Erst ab dieser Abweichung von der Tagestemperatur wird nachgestellt.
+          default: 0.5
+          selector:
+            number:
+              min: 0.2
+              max: 2
+              step: 0.1
+              unit_of_measurement: K
+              mode: box
+        min_day_hours:
+          name: Mindestdauer Tagbetrieb
+          description: So lange muss am Tag durchgehend normal geheizt worden sein.
+          default: 4
+          selector:
+            number:
+              min: 1
+              max: 12
+              step: 1
+              unit_of_measurement: h
+              mode: box
+        learn_interval_days:
+          name: Mindestabstand zwischen Anpassungen
+          default: 1
+          selector:
+            number:
+              min: 1
+              max: 7
+              step: 1
+              unit_of_measurement: Tage
+              mode: box
+        shift_step:
+          name: Schrittweite Niveau
+          default: 1
+          selector:
+            number:
+              min: 1
+              max: 3
+              step: 1
+              unit_of_measurement: K
+              mode: box
+        shift_min:
+          name: Niveau minimal
+          default: -5
+          selector:
+            number:
+              min: -13
+              max: 40
+              step: 1
+              unit_of_measurement: K
+              mode: box
+        shift_max:
+          name: Niveau maximal
+          default: 10
+          selector:
+            number:
+              min: -13
+              max: 40
+              step: 1
+              unit_of_measurement: K
+              mode: box
+        slope_step:
+          name: Schrittweite Neigung
+          default: 0.1
+          selector:
+            number:
+              min: 0.1
+              max: 0.3
+              step: 0.1
+              mode: box
+        slope_min:
+          name: Neigung minimal
+          default: 0.8
+          selector:
+            number:
+              min: 0.2
+              max: 3.5
+              step: 0.1
+              mode: box
+        slope_max:
+          name: Neigung maximal
+          default: 1.6
+          selector:
+            number:
+              min: 0.2
+              max: 3.5
+              step: 0.1
+              mode: box
+
+mode: queued
+max: 10
+max_exceeded: silent
+
+trigger_variables:
+  tv_mean: !input outside_mean_entity
+  tv_start: !input season_start
+  tv_end: !input season_end
+  tv_limit: !input heat_limit
+  tv_off_limit: !input offseason_limit
+  tv_hyst: !input hysteresis
+
+triggers:
+  - trigger: homeassistant
+    event: start
+    id: start
+  - trigger: state
+    entity_id: !input presence_zone
+    id: anwesenheit
+  - trigger: state
+    entity_id: !input presence_zone
+    to: "0"
+    for:
+      minutes: !input away_delay
+    id: abwesend
+  - trigger: state
+    entity_id: !input presence_zone
+    to: "0"
+    for:
+      hours: !input vacation_hours
+    id: urlaub
+  - trigger: state
+    entity_id: !input day_schedule
+    from: "off"
+    to: "on"
+    id: tagesbeginn
+  - trigger: state
+    entity_id: !input day_schedule
+    from: "on"
+    to: "off"
+    id: tagesende
+  - trigger: state
+    entity_id: !input climate_entity
+    attribute: active_vicare_mode
+    id: therme
+  - trigger: template
+    id: aussentemperatur
+    value_template: >-
+      {% set m = now().month %}
+      {% set in_season = (m >= tv_start or m <= tv_end) if tv_start > tv_end else (m >= tv_start and m <= tv_end) %}
+      {% set limit = tv_limit if in_season else tv_off_limit %}
+      {{ states(tv_mean) | is_number and states(tv_mean) | float(0) < limit }}
+  - trigger: template
+    id: aussentemperatur
+    value_template: >-
+      {% set m = now().month %}
+      {% set in_season = (m >= tv_start or m <= tv_end) if tv_start > tv_end else (m >= tv_start and m <= tv_end) %}
+      {% set limit = tv_limit if in_season else tv_off_limit %}
+      {{ states(tv_mean) | is_number and states(tv_mean) | float(0) > limit + tv_hyst }}
+  - trigger: time_pattern
+    minutes: 7
+    id: kontrolle
+
+variables:
+  climate_entity: !input climate_entity
+  normal_entity: !input normal_temp_entity
+  reduced_entity: !input reduced_temp_entity
+  shift_entity: !input shift_entity
+  slope_entity: !input slope_entity
+  outside_mean: !input outside_mean_entity
+  dhw_buttons: !input dhw_buttons
+  presence_zone: !input presence_zone
+  day_schedule: !input day_schedule
+  away_delay: !input away_delay
+  vacation_hours: !input vacation_hours
+  day_temp: !input day_temp
+  night_temp: !input night_temp
+  vacation_temp: !input vacation_temp
+  season_start: !input season_start
+  season_end: !input season_end
+  heat_limit: !input heat_limit
+  offseason_limit: !input offseason_limit
+  hysteresis: !input hysteresis
+  room_sensors: !input room_sensors
+  cold_day_limit: !input cold_day_limit
+  deadband: !input deadband
+  min_day_hours: !input min_day_hours
+  learn_interval_days: !input learn_interval_days
+  shift_step: !input shift_step
+  shift_min: !input shift_min
+  shift_max: !input shift_max
+  slope_step: !input slope_step
+  slope_min: !input slope_min
+  slope_max: !input slope_max
+
+actions:
+  # Nach einem Neustart warten, bis die ViCare-Entitäten Werte haben.
+  - if:
+      - condition: trigger
+        id: start
+    then:
+      - delay:
+          minutes: 2
+
+  # Momentaufnahme des Systems und Soll-Zustand berechnen (nur lesen, keine API-Aufrufe).
+  - variables:
+      climate_ok: >-
+        {{ states(climate_entity) not in ['unavailable', 'unknown']
+           and state_attr(climate_entity, 'active_vicare_mode') is not none }}
+      mode_now: "{{ state_attr(climate_entity, 'active_vicare_mode') or '' }}"
+      vicare_modes: "{{ state_attr(climate_entity, 'vicare_modes') or [] }}"
+      zone_ok: "{{ states(presence_zone) | is_number }}"
+      zone_count: "{{ states(presence_zone) | int(0) }}"
+      absent_minutes: >-
+        {% set z = states.zone | selectattr('entity_id', 'eq', presence_zone) | first %}
+        {% if zone_count > 0 or z is not defined %}{{ 0 }}
+        {% else %}{{ ((now() - z.last_changed).total_seconds() / 60) | round(1) }}{% endif %}
+      schedule_ok: "{{ states(day_schedule) in ['on', 'off'] }}"
+      day: "{{ is_state(day_schedule, 'on') }}"
+      out_ok: "{{ states(outside_mean) | is_number }}"
+      t_out: "{{ states(outside_mean) | float(0) }}"
+      in_season: >-
+        {% set m = now().month %}
+        {% if season_start > season_end %}{{ m >= season_start or m <= season_end }}
+        {% else %}{{ m >= season_start and m <= season_end }}{% endif %}
+      on_limit: "{{ heat_limit if in_season else offseason_limit }}"
+      heating_now: "{{ mode_now in ['dhwAndHeating', 'forcedReduced', 'forcedNormal'] }}"
+      heating_needed: >-
+        {% if not out_ok %}{{ heating_now }}
+        {% elif t_out < on_limit %}{{ true }}
+        {% elif t_out > on_limit + hysteresis %}{{ false }}
+        {% else %}{{ heating_now }}{% endif %}
+      normal_now: "{{ states(normal_entity) | float(-100) }}"
+      reduced_now: "{{ states(reduced_entity) | float(-100) }}"
+      temps_ok: "{{ normal_now > -50 and reduced_now > -50 }}"
+      vacation_marker: >-
+        {{ mode_now == 'standby'
+           or ((vacation_temp - night_temp) | abs >= 0.5
+               and (reduced_now - vacation_temp) | abs < 0.25) }}
+      vacation: >-
+        {{ zone_ok and zone_count == 0
+           and (absent_minutes >= vacation_hours * 60 or vacation_marker) }}
+      present: >-
+        {{ zone_ok and not vacation
+           and (zone_count > 0 or absent_minutes < away_delay) }}
+      returning: "{{ zone_count > 0 and vacation_marker }}"
+      desired_mode: >-
+        {% if heating_needed %}{{ 'dhwAndHeating' if (present and day) else 'forcedReduced' }}
+        {% else %}{{ 'standby' if vacation else 'dhw' }}{% endif %}
+      desired_normal: >-
+        {% set lo = state_attr(normal_entity, 'min') | float(day_temp) %}
+        {% set hi = state_attr(normal_entity, 'max') | float(day_temp) %}
+        {{ [[day_temp, lo] | max, hi] | min }}
+      desired_reduced: >-
+        {% set t = vacation_temp if (heating_needed and vacation) else night_temp %}
+        {% set lo = state_attr(reduced_entity, 'min') | float(t) %}
+        {% set hi = state_attr(reduced_entity, 'max') | float(t) %}
+        {{ [[t, lo] | max, hi] | min }}
+      reason: >-
+        Heizbedarf {{ 'ja' if heating_needed else 'nein' }}
+        (Außen-Ø {{ t_out | round(1) if out_ok else '?' }} °C, Grenze {{ on_limit }} °C{{ '' if in_season else ', außerhalb der Heizmonate' }}),
+        {{ 'Urlaub' if vacation else ('anwesend' if present else 'abwesend') }},
+        {{ 'Tag' if day else 'Nacht' }}
+
+  - if:
+      - condition: template
+        value_template: "{{ not (climate_ok and zone_ok and schedule_ok and temps_ok) }}"
+    then:
+      - stop: Therme, Anwesenheit oder Zeitplan sind gerade nicht verfügbar.
+
+  # Lernen: am Ende eines Heiztages, bevor auf Nacht umgeschaltet wird.
+  - if:
+      - condition: trigger
+        id: tagesende
+      - condition: template
+        value_template: "{{ room_sensors | count > 0 and heating_needed }}"
+    then:
+      - variables:
+          room_temp: >-
+            {% set ns = namespace(total=0, n=0) %}
+            {% for s in expand(room_sensors) if s.state | is_number %}
+              {% set ns.total = ns.total + s.state | float(0) %}
+              {% set ns.n = ns.n + 1 %}
+            {% endfor %}
+            {{ (ns.total / ns.n) | round(2) if ns.n > 0 else -100 }}
+          day_hours: >-
+            {% set c = expand(climate_entity) | first %}
+            {% if c is defined %}{{ ((now() - c.last_changed).total_seconds() / 3600) | round(2) }}
+            {% else %}{{ 0 }}{% endif %}
+          curve_ok: "{{ states(shift_entity) | is_number and states(slope_entity) | is_number }}"
+          shift_now: "{{ states(shift_entity) | float(0) }}"
+          slope_now: "{{ states(slope_entity) | float(0) }}"
+          curve_age_h: >-
+            {% set a = expand(shift_entity) | first %}
+            {% set b = expand(slope_entity) | first %}
+            {% if a is defined and b is defined %}{{ ((now() - ([a.last_changed, b.last_changed] | max)).total_seconds() / 3600) | round(2) }}
+            {% else %}{{ 0 }}{% endif %}
+          err: "{{ (room_temp - day_temp) | round(2) }}"
+          direction: "{{ 1 if err < -deadband else (-1 if err > deadband else 0) }}"
+          use_slope: "{{ t_out < cold_day_limit }}"
+          shift_lo: "{{ [shift_min, state_attr(shift_entity, 'min') | float(shift_min)] | max }}"
+          shift_hi: "{{ [shift_max, state_attr(shift_entity, 'max') | float(shift_max)] | min }}"
+          slope_lo: "{{ [slope_min, state_attr(slope_entity, 'min') | float(slope_min)] | max }}"
+          slope_hi: "{{ [slope_max, state_attr(slope_entity, 'max') | float(slope_max)] | min }}"
+          new_shift: "{{ [[shift_now + direction * shift_step, shift_lo] | max, shift_hi] | min }}"
+          new_slope: "{{ ([[slope_now + direction * slope_step, slope_lo] | max, slope_hi] | min) | round(1) }}"
+          skip_reason: >-
+            {% if room_temp < -50 %}Raumthermometer liefern keinen Wert
+            {% elif not out_ok %}Außentemperatur-Mittel nicht verfügbar
+            {% elif not curve_ok %}Heizkurve nicht verfügbar
+            {% elif mode_now != 'dhwAndHeating' %}heute kein Tagbetrieb bis zum Abend
+            {% elif day_hours < min_day_hours %}Tagbetrieb erst seit {{ day_hours | round(1) }} h
+            {% elif curve_age_h < learn_interval_days * 24 - 2 %}letzte Kurvenänderung erst vor {{ curve_age_h | round(1) }} h
+            {% elif direction == 0 %}Raumtemperatur passt ({{ room_temp }} °C bei Soll {{ day_temp }} °C)
+            {% endif %}
+          learn_info: >-
+            Raum {{ room_temp }} °C, Soll {{ day_temp }} °C, Außen-Ø {{ t_out | round(1) }} °C
+      - choose:
+          - conditions: "{{ skip_reason != '' }}"
+            sequence:
+              - action: logbook.log
+                data:
+                  name: Heizkurve lernen
+                  message: "Keine Anpassung: {{ skip_reason }}."
+                  entity_id: "{{ climate_entity }}"
+          - conditions: "{{ use_slope }}"
+            sequence:
+              - if: "{{ (new_slope - slope_now) | abs < 0.05 }}"
+                then:
+                  - action: persistent_notification.create
+                    data:
+                      notification_id: vicare_heizkurve_grenze
+                      title: "Heizkurve: Grenze der Neigung erreicht"
+                      message: >-
+                        Die Neigung steht auf {{ slope_now }} und darf laut Blueprint nicht weiter
+                        {{ 'steigen' if direction > 0 else 'sinken' }} ({{ learn_info }}).
+                        Prüfe das Heizkörperventil im Referenzraum und die Grenzen im Blueprint.
+                else:
+                  - action: number.set_value
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ slope_entity }}"
+                    data:
+                      value: "{{ new_slope }}"
+                  - action: logbook.log
+                    data:
+                      name: Heizkurve lernen
+                      message: "Neigung {{ slope_now }} → {{ new_slope }} ({{ learn_info }}, kalter Tag)."
+                      entity_id: "{{ climate_entity }}"
+        default:
+          - if: "{{ (new_shift - shift_now) | abs < 0.5 }}"
+            then:
+              - action: persistent_notification.create
+                data:
+                  notification_id: vicare_heizkurve_grenze
+                  title: "Heizkurve: Grenze des Niveaus erreicht"
+                  message: >-
+                    Das Niveau steht auf {{ shift_now | int }} und darf laut Blueprint nicht weiter
+                    {{ 'steigen' if direction > 0 else 'sinken' }} ({{ learn_info }}).
+                    Prüfe das Heizkörperventil im Referenzraum und die Grenzen im Blueprint.
+            else:
+              - action: number.set_value
+                continue_on_error: true
+                target:
+                  entity_id: "{{ shift_entity }}"
+                data:
+                  value: "{{ new_shift }}"
+              - action: logbook.log
+                data:
+                  name: Heizkurve lernen
+                  message: "Niveau {{ shift_now | int }} → {{ new_shift | int }} ({{ learn_info }}, milder Tag)."
+                  entity_id: "{{ climate_entity }}"
+
+  # Raum-Sollwerte nur schreiben, wenn sie abweichen.
+  - if: "{{ (normal_now - desired_normal) | abs >= 0.5 }}"
+    then:
+      - action: number.set_value
+        continue_on_error: true
+        target:
+          entity_id: "{{ normal_entity }}"
+        data:
+          value: "{{ desired_normal }}"
+      - action: logbook.log
+        data:
+          name: Heizungsautomatik
+          message: "Normaltemperatur {{ normal_now }} → {{ desired_normal }} °C."
+          entity_id: "{{ climate_entity }}"
+      - wait_template: "{{ (states(normal_entity) | float(-100) - desired_normal) | abs < 0.5 }}"
+        timeout: "00:03:00"
+        continue_on_timeout: true
+
+  - if: "{{ (reduced_now - desired_reduced) | abs >= 0.5 }}"
+    then:
+      - action: number.set_value
+        continue_on_error: true
+        target:
+          entity_id: "{{ reduced_entity }}"
+        data:
+          value: "{{ desired_reduced }}"
+      - action: logbook.log
+        data:
+          name: Heizungsautomatik
+          message: >-
+            Reduzierte Temperatur {{ reduced_now }} → {{ desired_reduced }} °C
+            ({{ 'Urlaub' if (heating_needed and vacation) else 'Alltag' }}).
+          entity_id: "{{ climate_entity }}"
+      - wait_template: "{{ (states(reduced_entity) | float(-100) - desired_reduced) | abs < 0.5 }}"
+        timeout: "00:03:00"
+        continue_on_timeout: true
+
+  # Betriebsart nur schreiben, wenn sie abweicht und die Therme sie anbietet.
+  - if: "{{ mode_now != desired_mode }}"
+    then:
+      - if: "{{ desired_mode in vicare_modes }}"
+        then:
+          - action: vicare.set_vicare_mode
+            continue_on_error: true
+            target:
+              entity_id: "{{ climate_entity }}"
+            data:
+              vicare_mode: "{{ desired_mode }}"
+          - action: logbook.log
+            data:
+              name: Heizungsautomatik
+              message: "Betriebsart {{ mode_now }} → {{ desired_mode }}: {{ reason }}."
+              entity_id: "{{ climate_entity }}"
+          - wait_template: "{{ is_state_attr(climate_entity, 'active_vicare_mode', desired_mode) }}"
+            timeout: "00:03:00"
+            continue_on_timeout: true
+        else:
+          - action: logbook.log
+            data:
+              name: Heizungsautomatik
+              message: >-
+                Betriebsart {{ desired_mode }} wird von der Therme nicht angeboten
+                (verfügbar: {{ vicare_modes | join(', ') }}).
+              entity_id: "{{ climate_entity }}"
+
+  # Heimkehr aus dem Urlaub: Warmwasser einmal sofort aufheizen.
+  - if: "{{ returning and dhw_buttons | count > 0 }}"
+    then:
+      - action: button.press
+        continue_on_error: true
+        target:
+          entity_id: "{{ dhw_buttons }}"
+      - action: logbook.log
+        data:
+          name: Heizungsautomatik
+          message: Heimkehr aus dem Urlaub, einmalige Warmwasserbereitung gestartet.
+          entity_id: "{{ climate_entity }}"
