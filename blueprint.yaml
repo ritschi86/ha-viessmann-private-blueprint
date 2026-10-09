@@ -5,13 +5,15 @@ blueprint:
 
     **Betriebsarten**
 
-    | Situation | Betriebsart |
-    |---|---|
-    | Heizsaison, Tag, jemand da | `dhwAndHeating` |
-    | Heizsaison, Nacht oder abwesend | `forcedReduced` (Warmwasser pausiert) |
-    | Heizsaison, Urlaub | `forcedReduced` mit Urlaubstemperatur |
-    | Keine Heizsaison | `dhw` |
-    | Keine Heizsaison, Urlaub | `standby` (Abschaltbetrieb, Frostschutz aktiv) |
+    | Situation | Betriebsart | Normaltemperatur | Warmwasser |
+    |---|---|---|---|
+    | Heizsaison, Tag, jemand da | `dhwAndHeating` | Tagestemperatur | Zeitprogramm der Therme |
+    | Heizsaison, Nacht oder abwesend | `dhwAndHeating` | Nachttemperatur | Zeitprogramm der Therme |
+    | Heizsaison, Urlaub | `forcedReduced`, reduziert = Urlaubstemperatur | – | pausiert |
+    | Keine Heizsaison | `dhw` | – | Zeitprogramm der Therme |
+    | Keine Heizsaison, Urlaub | `standby` (Abschaltbetrieb, Frostschutz aktiv) | – | pausiert |
+
+    Version 2 (09.10.2026): Die Nachtabsenkung läuft über die Normaltemperatur statt über `forcedReduced`, weil `forcedReduced` laut HA-Doku auch die Warmwasserbereitung abschaltet.
 
     **Voraussetzungen**
 
@@ -24,7 +26,7 @@ blueprint:
 
     **Lernen:** Am Ende jedes Heiztages (Zeitplan wechselt auf inaktiv) vergleicht die Automation die Raumtemperatur mit der Tagestemperatur. An milden Tagen passt sie das Niveau an, an kalten Tagen die Neigung, jeweils um einen kleinen Schritt und innerhalb fester Grenzen. Ohne Raumthermometer ist das Lernen aus.
 
-    **Manuell übersteuern:** Automation deaktivieren. Solange sie aktiv ist, stellt sie Änderungen an der Betriebsart wieder zurück.
+    **Manuell übersteuern:** Automation deaktivieren. Solange sie aktiv ist, stellt sie Änderungen an Betriebsart und Normaltemperatur wieder zurück.
   domain: automation
   homeassistant:
     min_version: "2024.10.0"
@@ -44,7 +46,9 @@ blueprint:
                 domain: climate
         normal_temp_entity:
           name: Normaltemperatur
-          description: Number-Entität für die normale Raum-Solltemperatur.
+          description: >-
+            Number-Entität für die normale Raum-Solltemperatur. Wird tagsüber auf die
+            Tagestemperatur und nachts bzw. bei Abwesenheit auf die Nachttemperatur gesetzt.
           selector:
             entity:
               filter:
@@ -52,7 +56,9 @@ blueprint:
                 domain: number
         reduced_temp_entity:
           name: Reduzierte Temperatur
-          description: Number-Entität für die reduzierte Raum-Solltemperatur.
+          description: >-
+            Number-Entität für die reduzierte Raum-Solltemperatur. Wird nur im Urlaub
+            in der Heizsaison genutzt (Urlaubstemperatur).
           selector:
             entity:
               filter:
@@ -153,6 +159,9 @@ blueprint:
               mode: box
         night_temp:
           name: Nachttemperatur / abwesend
+          description: >-
+            Wird nachts und bei Abwesenheit als Normaltemperatur gesetzt.
+            Die Warmwasserbereitung läuft dabei weiter.
           default: 17
           selector:
             number:
@@ -274,7 +283,9 @@ blueprint:
               mode: box
         min_day_hours:
           name: Mindestdauer Tagbetrieb
-          description: So lange muss am Tag durchgehend normal geheizt worden sein.
+          description: >-
+            So lange muss die Normaltemperatur vor Tagesende durchgehend auf der
+            Tagestemperatur gestanden haben.
           default: 4
           selector:
             number:
@@ -497,13 +508,18 @@ actions:
         {{ zone_ok and not vacation
            and (zone_count > 0 or absent_minutes < away_delay) }}
       returning: "{{ zone_count > 0 and vacation_marker }}"
+      # forcedReduced nur im Urlaub: es schaltet laut HA-Doku auch das Warmwasser ab.
       desired_mode: >-
-        {% if heating_needed %}{{ 'dhwAndHeating' if (present and day) else 'forcedReduced' }}
+        {% if heating_needed %}{{ 'forcedReduced' if vacation else 'dhwAndHeating' }}
         {% else %}{{ 'standby' if vacation else 'dhw' }}{% endif %}
+      # Tag/Nacht über die Normaltemperatur. Außerhalb des Heizbetriebs bleibt sie unverändert.
       desired_normal: >-
-        {% set lo = state_attr(normal_entity, 'min') | float(day_temp) %}
-        {% set hi = state_attr(normal_entity, 'max') | float(day_temp) %}
-        {{ [[day_temp, lo] | max, hi] | min }}
+        {% if heating_needed and not vacation %}
+          {% set t = day_temp if (present and day) else night_temp %}
+          {% set lo = state_attr(normal_entity, 'min') | float(t) %}
+          {% set hi = state_attr(normal_entity, 'max') | float(t) %}
+          {{ [[t, lo] | max, hi] | min }}
+        {% else %}{{ normal_now }}{% endif %}
       desired_reduced: >-
         {% set t = vacation_temp if (heating_needed and vacation) else night_temp %}
         {% set lo = state_attr(reduced_entity, 'min') | float(t) %}
@@ -537,8 +553,8 @@ actions:
             {% endfor %}
             {{ (ns.total / ns.n) | round(2) if ns.n > 0 else -100 }}
           day_hours: >-
-            {% set c = expand(climate_entity) | first %}
-            {% if c is defined %}{{ ((now() - c.last_changed).total_seconds() / 3600) | round(2) }}
+            {% set n = expand(normal_entity) | first %}
+            {% if n is defined %}{{ ((now() - n.last_changed).total_seconds() / 3600) | round(2) }}
             {% else %}{{ 0 }}{% endif %}
           curve_ok: "{{ states(shift_entity) | is_number and states(slope_entity) | is_number }}"
           shift_now: "{{ states(shift_entity) | float(0) }}"
@@ -561,7 +577,7 @@ actions:
             {% if room_temp < -50 %}Raumthermometer liefern keinen Wert
             {% elif not out_ok %}Außentemperatur-Mittel nicht verfügbar
             {% elif not curve_ok %}Heizkurve nicht verfügbar
-            {% elif mode_now != 'dhwAndHeating' %}heute kein Tagbetrieb bis zum Abend
+            {% elif mode_now != 'dhwAndHeating' or (normal_now - day_temp) | abs >= 0.5 %}am Abend kein Tagbetrieb (Normaltemperatur {{ normal_now }} °C)
             {% elif day_hours < min_day_hours %}Tagbetrieb erst seit {{ day_hours | round(1) }} h
             {% elif curve_age_h < learn_interval_days * 24 - 2 %}letzte Kurvenänderung erst vor {{ curve_age_h | round(1) }} h
             {% elif direction == 0 %}Raumtemperatur passt ({{ room_temp }} °C bei Soll {{ day_temp }} °C)
@@ -636,7 +652,7 @@ actions:
       - action: logbook.log
         data:
           name: Heizungsautomatik
-          message: "Normaltemperatur {{ normal_now }} → {{ desired_normal }} °C."
+          message: "Normaltemperatur {{ normal_now }} → {{ desired_normal }} °C: {{ reason }}."
           entity_id: "{{ climate_entity }}"
       - wait_template: "{{ (states(normal_entity) | float(-100) - desired_normal) | abs < 0.5 }}"
         timeout: "00:03:00"
